@@ -1,0 +1,210 @@
+import tensorflow as tf
+tfk = tf.keras
+
+import matplotlib.pyplot as plt
+import numpy as np
+import cv2
+import io
+import math
+
+def plot(data, title, max_i, axs):
+    for k in range(0, max_i):
+        if k==0:
+            #axs[k].title.set_text(title)
+            axs[k].set_ylabel(title)
+        if data.shape[-1] == 2:
+            axs[k].imshow(draw_hsv(data[k,...]))
+        else:           
+            axs[k].imshow(data[k,...], cmap='gray')
+
+def draw_hsv(flow):
+    h, w, c = flow.shape
+    fx, fy = flow[...,0], flow[...,1]
+    ang = np.arctan2(fy, fx) + np.pi
+    v = np.sqrt(fx*fx+fy*fy)
+    hsv = np.zeros((h, w, 3), np.uint8)
+    hsv[...,0] = ang*(180/np.pi/2)
+    hsv[...,1] = 255
+    hsv[...,2] = cv2.normalize(v, None, 0, 255, cv2.NORM_MINMAX)
+    bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+    return bgr
+
+def plot_to_image(y, result):    
+    step = 5
+    s = 0
+    l_org = y.shape[1] // step
+    l = l_org
+
+    rows = np.sum([len(v.keys()) for k, v in result.items()])
+    figure, axs = plt.subplots(rows+1,l, sharex=True, sharey=True, figsize=(3.2*l, (len(result)+1)*2.4))
+    axs = axs.flatten()
+    [ax.axes.xaxis.set_ticks([]) for ax in axs]
+    [ax.axes.yaxis.set_ticks([]) for ax in axs]
+    
+    if y is not None:
+        plot(y[0,::step,...], 'True image', l_org, axs[s:l])
+        s = l
+        l = l+l_org
+    
+    for k, v in result.items(): #{'type': {'images': data, 'flows': data}}
+        for k1, v1 in v.items():
+            #plot(v[0,::step,...].numpy(), k.numpy().decode("utf-8"), l_org, axs[s:l])
+            plot(v1[0,::step,...].numpy(), ' '.join([k, k1]), l_org, axs[s:l])
+            s = l
+            l = l+l_org
+    
+    #plt.tight_layout()
+    plt.subplots_adjust(wspace=0, hspace=0)
+    
+    # Save the plot to a PNG in memory.
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    # Closing the figure prevents it from being displayed directly inside
+    # the notebook.
+    plt.close(figure)
+    buf.seek(0)
+    # Convert PNG buffer to TF image
+    image = tf.image.decode_png(buf.getvalue(), channels=4)
+    # Add the batch dimension
+    image = tf.expand_dims(image, 0)
+    return image
+
+
+def latent_plot(latent_dist, x_obs):
+    x = x_obs
+    
+    y_max = np.max(x, axis=1)
+    y_min = np.min(x, axis=1)
+    y_diff = y_max - y_min
+       
+    handles = {}
+    
+    if 'full' not in latent_dist:
+        dims = x.shape[2]
+        t = np.arange(x.shape[1])
+        figure, axs = plt.subplots(1,dims, figsize=(6.4*dims, 4.8))
+        for i in range(dims):
+            axs[i].plot(t, x[0,:,i],'--', label='x')
+    else:
+        x_sample  = latent_dist['sample'][0]
+        x_mu_sample = latent_dist['sample'][1]
+        x_std_sample = latent_dist['sample'][2]
+
+        x_half  = latent_dist['half'][0]
+        x_mu_half = latent_dist['half'][1]
+        x_std_half = latent_dist['half'][2]
+
+        x_full  = latent_dist['full'][0]
+        x_mu_full = latent_dist['full'][1]
+        x_std_full = latent_dist['full'][2]
+        
+        t = np.arange(x.shape[1])
+        dims = x.shape[2]
+
+        k,l = math.ceil(dims/8), min(dims,8)
+        figure, axs = plt.subplots(k,l, figsize=(5*l,5*k), sharey=False,sharex=True)                
+        
+        axs = axs.flatten()
+        for i in range(dims):           
+            
+            x_f = x_full[0,:,i]
+            mu_f = x_mu_full[0,:,i]
+            stf_f = x_std_full[0,:,i]
+            
+            axs[i].plot(t, x[0,:,i],'--', label='x')
+            axs[i].plot(t, x_f, '--y', label='x(t)')
+            axs[i].plot(t, mu_f, 'y', label='x(t|T)')
+            axs[i].fill_between(t, mu_f-stf_f, mu_f+stf_f, alpha=0.2, color='y')                
+            
+            axs[i].set_ylim([y_min[0,i] - y_diff[0,i]*0.2, y_max[0,i] + y_diff[0,i]*0.2])
+            axs[i].legend(loc="upper left", ncol=1)
+                    
+    
+    plt.tight_layout()
+    # Save the plot to a PNG in memory.
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    # Closing the figure prevents it from being displayed directly inside
+    # the notebook.
+    plt.close(figure)
+    buf.seek(0)
+    # Convert PNG buffer to TF image
+    image = tf.image.decode_png(buf.getvalue(), channels=4)
+    # Add the batch dimension
+    image = tf.expand_dims(image, 0)
+    return image
+
+class VisualizeResultCallback(tfk.callbacks.Callback):
+    def __init__(self, img_writer, train_data, test_data = None, log_interval = 5):
+        self.img_writer = img_writer
+        self.train_data = train_data
+        self.test_data = test_data
+        self.log_interval = log_interval   
+
+    def visualize_model(self, epoch):
+        if epoch % self.log_interval == 0:
+            train_result = self.model.eval(self.train_data)
+            img_figure_train = plot_to_image(self.train_data['input_video'], train_result['image_data'])
+            
+            if self.test_data is not None:
+                test_result = self.model.eval(self.test_data)
+                img_figure_test = plot_to_image(self.test_data['input_video'], test_result['image_data'])
+            
+            if 'latent_dist' in train_result.keys():
+                train_latent_figure = latent_plot(train_result['latent_dist'], train_result['x_obs'])
+                if self.test_data is not None:
+                    test_latent_figure = latent_plot(test_result['latent_dist'], test_result['x_obs'])
+            
+            with self.img_writer.as_default():
+                tf.summary.image("Images train", img_figure_train, step=epoch)
+                if self.test_data is not None:
+                    tf.summary.image("Images test", img_figure_test, step=epoch)
+                if 'latent_dist' in train_result.keys():
+                    tf.summary.image("Latents train", train_latent_figure, step=epoch)
+                    if self.test_data is not None:
+                        tf.summary.image("Latents test", test_latent_figure, step=epoch)
+
+    def on_epoch_end(self, epoch, logs=None):
+        self.visualize_model(epoch)
+
+class VisualizeResultCallbackMM(VisualizeResultCallback):
+    def visualize_model(self, epoch):
+        if epoch % self.log_interval == 0:
+            train_trans, train_sag, train_cor = self.model.eval(self.train_data)
+            img_train_trans = plot_to_image(self.train_data['transversal'], train_trans['image_data'])
+            img_train_sag = plot_to_image(self.train_data['sagittal'], train_sag['image_data'])
+            img_train_cor = plot_to_image(self.train_data['coronal'], train_cor['image_data'])
+            
+            if self.test_data is not None:
+                test_tran, test_sag, test_cor = self.model.eval(self.test_data)
+                img_test_trans = plot_to_image(self.test_data['transversal'], test_tran['image_data'])
+                img_test_sag = plot_to_image(self.test_data['sagittal'], test_sag['image_data'])
+                img_test_cor = plot_to_image(self.test_data['coronal'], test_cor['image_data'])
+            
+            if 'latent_dist' in train_trans.keys():
+                train_latent_trans = latent_plot(train_trans['latent_dist'], train_trans['x_obs'])
+                train_latent_sag = latent_plot(train_sag['latent_dist'], train_sag['x_obs'])
+                train_latent_cor = latent_plot(train_cor['latent_dist'], train_cor['x_obs'])
+                if self.test_data is not None:
+                    test_latent_trans = latent_plot(test_tran['latent_dist'], test_tran['x_obs'])
+                    test_latent_sag = latent_plot(test_sag['latent_dist'], test_sag['x_obs'])
+                    test_latent_cor = latent_plot(test_cor['latent_dist'], test_cor['x_obs'])
+            
+            with self.img_writer.as_default():
+                tf.summary.image("Images train Trans", img_train_trans, step=epoch)
+                tf.summary.image("Images train Sag", img_train_sag, step=epoch)
+                tf.summary.image("Images train Cor", img_train_cor, step=epoch)
+
+                if self.test_data is not None:
+                    tf.summary.image("Images test Trans", img_test_trans, step=epoch)
+                    tf.summary.image("Images test Sag", img_test_sag, step=epoch)
+                    tf.summary.image("Images test Cor", img_test_cor, step=epoch)
+                
+                if 'latent_dist' in train_trans.keys():
+                    tf.summary.image("Latents train Trans", train_latent_trans, step=epoch)
+                    tf.summary.image("Latents train Sag", train_latent_sag, step=epoch)
+                    tf.summary.image("Latents train Cor", train_latent_cor, step=epoch)
+                    if self.test_data is not None:
+                        tf.summary.image("Latents test Trans", test_latent_trans, step=epoch)
+                        tf.summary.image("Latents test Sag", test_latent_sag, step=epoch)
+                        tf.summary.image("Latents test Cor", test_latent_cor, step=epoch)
